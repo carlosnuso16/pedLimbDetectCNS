@@ -269,7 +269,7 @@ def process_data_set(folders, set_name, limit=None):
 
 def main_generate():
     root_dir = get_base_path()+'cdac Dropbox/BCH_h5_samples'
-    scripts_dir = get_base_path()+'cdac Dropbox/Carlos Nunez-Sosa/pedLimb'
+    scripts_dir = get_base_path()+'pedLimbDetectCNS'
 
     train_folders = load_h5_folders(scripts_dir+'/train_set.csv', root_dir)
     val_folders = load_h5_folders(scripts_dir+'/val_set.csv', root_dir)
