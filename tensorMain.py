@@ -1,48 +1,91 @@
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '2'  # Use only GPU 1
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'  # Use only GPU 2
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Suppress TensorFlow warnings
 
 import tensorflow as tf
 import numpy as np
-import pandas as pd
-import h5py
+import glob # We'll use this to find your .tfrecord files
 from tensorflow import keras
-from tensorflow.keras.losses import BinaryCrossentropy
 from tensorflow.keras import layers
-from scipy.signal import iirnotch, butter, filtfilt, hilbert, resample
 from tensorflow.keras.callbacks import Callback
 from sklearn.metrics import f1_score
 import tensorflow.keras.backend as K
-import mne
 from sklearn.utils.class_weight import compute_class_weight
 import warnings
-from tensorflow.keras.mixed_precision import set_global_policy
-import psutil
-import GPUtil
-import socket
 
-# Disable warnings again just in case
-warnings.filterwarnings('ignore')
+# --- 1. Constants (from your original script) ---
+# These are needed for the parser to know the shape of your data
+SEGMENT_COUNT = 35
+SEGMENT_LEN_SEC = 30
+SF_TARGET = 128
+ANOT_TARGET_FREQ = 2
+NUM_CHANNELS = 2 # Rat and Lat
 
-# --- Path Functions ---
+SIGNAL_SAMPLES = SEGMENT_COUNT * SEGMENT_LEN_SEC * SF_TARGET # 134400
+ANOT_SAMPLES = SEGMENT_COUNT * SEGMENT_LEN_SEC * ANOT_TARGET_FREQ # 2100
 
-def get_base_path():
-    computer_name = socket.gethostname()
-    if computer_name == "Flippy":
-        return "c:/Users/carlo/"
-    elif computer_name == "erikjan-desktop":
-        return "/media/erikjan/SeagateC25_stora/"
-    else:
-        return "default/path/"
+# --- 2. Data Loading & Parsing ---
+# This section is for reading your *existing* .tfrecord files.
 
-root_dir = get_base_path()+'cdac Dropbox/Carlos Nunez-Sosa/pedLimb0/'
-folders_dir = get_base_path()+'cdac Dropbox/Carlos Nunez-Sosa/pedLimb0/tfrecords/'
+def parse_tfrecord(example_proto):
+    """
+    Parses a single TFRecord example.
+    
+    CRITICAL: This parser is from your *first* script. It correctly
+    handles the signal shape you saved: (2, 134400). It will
+    reshape and transpose it to (134400, 2) for the model.
+    """
+    feature_description = {
+        'signals': tf.io.FixedLenFeature([], tf.string),
+        'annotations': tf.io.FixedLenFeature([ANOT_SAMPLES], tf.int64),
+    }
+    parsed_example = tf.io.parse_single_example(example_proto, feature_description)
 
-# --- Model Definition (No changes needed here) ---
+    # 1. Decode signals (bytes to float32)
+    signals = tf.io.decode_raw(parsed_example['signals'], tf.float32)
+    
+    # 2. Reshape to (Channels, Samples)
+    signals = tf.reshape(signals, (NUM_CHANNELS, SIGNAL_SAMPLES)) # Reshape to (2, 134400)
+    
+    # 3. Transpose to (Time, Channels) for the 1D U-Net
+    signals = tf.transpose(signals) # Transpose to (134400, 2)
+    
+    # 4. Extract and cast annotations
+    annotations = tf.cast(parsed_example['annotations'], tf.int32)
 
-def build_unet_model_ayt(input_shape=(134400, 2), alpha=1.67):
-    # ... (Model Definition remains the same) ...
+    return signals, annotations
+
+def create_dataset(tfrecord_files, batch_size=64, shuffle_buffer_size=100, prefetch_buffer_size=1, is_training=True):
+    """
+    Create a tf.data.Dataset pipeline from a list of TFRecord files.
+    """
+    dataset = tf.data.TFRecordDataset(tfrecord_files, num_parallel_reads=tf.data.AUTOTUNE)
+    
+    if is_training:
+        # For training, shuffle the dataset
+        dataset = dataset.shuffle(shuffle_buffer_size)
+        
+    dataset = dataset.map(parse_tfrecord, num_parallel_calls=tf.data.AUTOTUNE)  # Parse each record
+    dataset = dataset.batch(batch_size)  # Batch the data
+    dataset = dataset.prefetch(buffer_size=tf.data.AUTOTUNE)  # Prefetch for performance
+    
+    return dataset
+
+# --- 3. Model Architecture ---
+# This is the 'build_usleep_model_ayt' from your advisor's script.
+# I've removed the buggy 'build_usleep_model' to avoid confusion.
+
+def build_usleep_model_ayt(input_shape=(134400, 2), alpha=1.67):
+    """
+    Builds the 1D U-Net model.
+    This is the corrected version ('ayt') from your advisor's script.
+    """
     def encoder_block(x, filters, kernel_size=9):
+        # NOTE: l2_lambda and dropout_rate are hardcoded to None
+        # based on the provided script.
+        l2_lambda = None
+        dropout_rate = None
+        
         kernel_regularizer = tf.keras.regularizers.l2(l2_lambda) if l2_lambda else None
         x = layers.Conv1D(filters, kernel_size, padding='same', kernel_regularizer=kernel_regularizer)(x)
         x = layers.ELU()(x)
@@ -50,21 +93,25 @@ def build_unet_model_ayt(input_shape=(134400, 2), alpha=1.67):
         if dropout_rate:
             x = layers.Dropout(dropout_rate)(x)
         res = x
+        # Pad if the time dimension is odd
         x = layers.ZeroPadding1D((0, 1))(x) if x.shape[1] % 2 != 0 else x
         x = layers.MaxPooling1D(2)(x)
         return x, res
 
     def decoder_block(x, res, filters, kernel_size=9):
+        l2_lambda = None # Hardcoded
+        
         kernel_regularizer = tf.keras.regularizers.l2(l2_lambda) if l2_lambda else None
         x = layers.UpSampling1D(2)(x)
         x = layers.Conv1D(filters, kernel_size, padding='same', kernel_regularizer=kernel_regularizer)(x)
         x = layers.ELU()(x)
         x = layers.BatchNormalization()(x)
        
+        # Crop or pad the residual connection (skip connection) to match shapes
         diff = res.shape[1] - x.shape[1]
-        if diff > 0:
+        if diff > 0: # res is larger
             res = layers.Cropping1D((diff // 2, diff - diff // 2))(res)
-        elif diff < 0:
+        elif diff < 0: # x is larger
             x = layers.Cropping1D((-diff // 2, -diff - (-diff // 2)))(x)
        
         x = layers.Concatenate()([x, res])
@@ -73,231 +120,251 @@ def build_unet_model_ayt(input_shape=(134400, 2), alpha=1.67):
         x = layers.BatchNormalization()(x)
         return x
 
-    l2_lambda = None
-    dropout_rate = None
+    # --- Model Body ---
+    l2_lambda = None # Hardcoded
     inputs = keras.Input(shape=input_shape)
     x = inputs
 
     encoder_residuals = []
+    # These are the 12 filter sizes for the 12 encoder blocks
     filter_sizes = np.array([6, 9, 11, 15, 20, 28, 40, 55, 77, 108, 152, 214])
 
+    # Encoder Path
     for filters in filter_sizes:
         x, res = encoder_block(x, filters)
         encoder_residuals.append(res)
 
+    # Bottleneck
     x = layers.Conv1D(int(306 * np.sqrt(alpha)), 9, padding='same',
                       kernel_regularizer=tf.keras.regularizers.l2(l2_lambda) if l2_lambda else None)(x)
     x = layers.ELU()(x)
     x = layers.BatchNormalization()(x)
 
-
+    # Decoder Path
     for res, filters in zip(reversed(encoder_residuals), reversed(filter_sizes)):
         x = decoder_block(x, res, filters)
 
+    # --- Output Head ---
+    # This maps the high-res (134400) output to the low-res (2100) target
+    
     x = layers.Conv1D(6, 1, padding='same', activation='tanh')(x)
-    x = layers.AveragePooling1D(pool_size=64)(x)
+    
+    # CRITICAL DOWNSAMPLING: 134400 / 64 = 2100
+    x = layers.AveragePooling1D(pool_size=64)(x) 
+    
     x = layers.Conv1D(5, 1, padding='same', activation='elu')(x)
-
+    
+    # Final prediction layer: (Batch, 2100, 1)
     outputs = layers.Conv1D(1, 1, padding='same', activation='sigmoid')(x)
 
     model = keras.Model(inputs, outputs)
     return model
 
-# --- F1 Metric (Custom is left in but not used in compile) ---
-
-def f1_m(y_true, y_pred):
-    y_true = K.cast(y_true, 'float32')
-    y_pred = K.cast(y_pred, 'float32')
-    
-
-    tp = K.sum(y_true * y_pred) # <-- Note: Removed axis=0 for proper summation
-    fp = K.sum((1 - y_true) * y_pred)
-    fn = K.sum(y_true * (1 - y_pred))
-
-    precision = tp / (tp + fp + K.epsilon())
-    recall = tp / (tp + fn + K.epsilon())
-
-    return 2 * ((precision * recall) / (precision + recall + K.epsilon()))
-
-# --- Weighted Focal Loss (CRITICAL: Needs low learning rate for stability) ---
-
-def create_weighted_focal_loss(class_weight_dict, gamma=2.0):
-    def weighted_focal_loss(y_true, y_pred):
-        y_true = tf.cast(y_true, dtype=tf.float32)
-        y_pred = tf.cast(y_pred, dtype=tf.float32)
-
-        # Fix Shape Mismatch: y_true is (batch, 2100), y_pred is (batch, 2100, 1)
-        # tf.expand_dims is crucial for element-wise multiplication below
-        y_true = tf.expand_dims(y_true, axis=-1)
-
-        # Numerical Stability: Clip predictions to avoid log(0)
-        epsilon = tf.keras.backend.epsilon()
-        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
-
-        # Get the weights for class 0 (background) and class 1 (movement)
-        weight_for_0 = class_weight_dict.get(0, 1.0)
-        weight_for_1 = class_weight_dict.get(1, 1.0)
-
-        # Focal Loss components
-        # pt for class 1 (where y_true is 1) is y_pred
-        pt_1 = y_pred 
-        # pt for class 0 (where y_true is 0) is (1 - y_pred)
-        pt_0 = 1. - y_pred
-
-        # Loss calculation (y_true acts as the mask/indicator for class 1)
-        loss_for_1 = -weight_for_1 * tf.math.pow(1. - pt_1, gamma) * tf.math.log(pt_1)
-        loss_for_0 = -weight_for_0 * tf.math.pow(1. - pt_0, gamma) * tf.math.log(pt_0)
-        
-        # Combine the losses: y_true selects loss_for_1, (1-y_true) selects loss_for_0
-        loss = y_true * loss_for_1 + (1. - y_true) * loss_for_0
-
-        return tf.reduce_mean(loss)
-
-    return weighted_focal_loss
-
-# --- Data Pipeline Functions (Assuming parse_tfrecord is correct) ---
-
-def create_dataset(tfrecord_files, batch_size=64, shuffle_buffer_size=100, prefetch_buffer_size=1):
-    dataset = tf.data.TFRecordDataset(tfrecord_files)
-    dataset = dataset.map(parse_tfrecord, num_parallel_calls=tf.data.AUTOTUNE) # Use AUTOTUNE
-    dataset = dataset.shuffle(shuffle_buffer_size)
-    dataset = dataset.batch(batch_size)
-    dataset = dataset.prefetch(prefetch_buffer_size)
-    return dataset
-
-def parse_tfrecord(example_proto):
-    feature_description = {
-        'signals': tf.io.FixedLenFeature([], tf.string),
-        'annotations': tf.io.FixedLenFeature([2100], tf.int64),
-    }
-    parsed_example = tf.io.parse_single_example(example_proto, feature_description)
-
-    signals = tf.io.decode_raw(parsed_example['signals'], tf.float32)
-    signals = tf.reshape(signals, (134400, 2))
-
-    annotations = tf.cast(parsed_example['annotations'], tf.float32)
-    return signals, annotations
+# --- 4. Loss Functions (for Imbalanced Data) ---
 
 def compute_class_weights(train_dataset):
-    """
-    Calculates class weights and total steps for the Keras fit function.
-    """
-    print("Computing class weights efficiently...")
-    class_counts = {0: 0, 1: 0}
-    total_batches = 0 
-    
-    # Iterate through the dataset once to count labels
+    """Calculate class weights based on training data distribution."""
+    print("Calculating class weights... This may take a moment.")
+    all_labels = []
+   
+    # Iterate over the dataset to collect all labels
     for _, annotations in train_dataset:
-        total_batches += 1
-        labels = annotations.numpy().flatten()
-        unique, counts = np.unique(labels, return_counts=True)
-        for label, count in zip(unique, counts):
-            if label in class_counts:
-                class_counts[label] += count
-    
-    if class_counts[0] == 0 or class_counts[1] == 0:
-        print("Warning: One class has zero samples in the dataset.")
-        return {0: 1.0, 1: 1.0}, total_batches 
+        all_labels.extend(annotations.numpy().flatten())
 
-    # Create dummy array for sklearn's utility to get balanced weights
-    class_labels = np.array(list(class_counts.keys()))
-    y_dummy = np.concatenate([np.full(class_counts[cls], cls) for cls in class_labels])
+    # Compute weights
+    class_labels = np.unique(all_labels)
+    class_weights = compute_class_weight("balanced", classes=class_labels, y=all_labels)
+
+    # Convert to dictionary format
+    class_weight_dict = {i: class_weights[i] for i in range(len(class_weights))}
+   
+    print("Computed Class Weights:", class_weight_dict)
+    return class_weight_dict
+
+def weighted_focal_loss(class_weight_dict, gamma=2.0):
+    """
+    A custom loss function that combines Focal Loss with
+    pre-computed class weights.
+    """
+    def loss_fn(y_true, y_pred):
+        y_pred = tf.cast(y_pred, dtype=tf.float32)
+        y_true = tf.cast(y_true, dtype=tf.float32)
+        
+        # Clip predictions to avoid log(0)
+        y_pred = tf.clip_by_value(y_pred, K.epsilon(), 1 - K.epsilon())
+        
+        # Cast y_true to int to use as index
+        y_true_int = tf.cast(y_true, 'int32')
+       
+        # Get the weights for each sample
+        # [0.5, 56.5]
+        weights_tensor = tf.constant([class_weight_dict[i] for i in sorted(class_weight_dict.keys())], dtype=tf.float32)
+        # Gather weights: if y_true_int is 0, pick 0.5; if 1, pick 56.5
+        weights = tf.gather(weights_tensor, y_true_int)
+
+        # Compute focal loss components
+        focal_loss_pt = -y_true * tf.math.log(y_pred) * (1 - y_pred) ** gamma
+        focal_loss_npt = - (1 - y_true) * tf.math.log(1 - y_pred) * (y_pred ** gamma)
+        
+        focal_loss = focal_loss_pt + focal_loss_npt
+        
+        # Apply the class weights
+        weighted_loss = weights * focal_loss
+        
+        return tf.reduce_mean(weighted_loss)
+
+    return loss_fn
+
+# --- 5. Metrics & Callbacks (for Imbalanced Data) ---
+
+class F1ScoreCallback(Callback):
+    """
+    A custom callback to compute F1 score on training and validation
+    data at the end of each epoch.
     
-    balanced_weights = compute_class_weight(
-        "balanced",
-        classes=class_labels,
-        y=y_dummy
+    This is much more reliable than 'accuracy' for imbalanced data.
+    It also saves the model *only* when the validation F1 improves.
+    """
+    def __init__(self, validation_data, train_data=None):
+        super().__init__()
+        self.validation_data = validation_data
+        self.train_data = train_data
+        self.best_f1 = 0.0  # Track best F1 score
+
+    def compute_f1(self, dataset, dataset_name=""):
+        """Helper function to compute F1 score for a given dataset."""
+        print(f"\nCalculating F1 score for {dataset_name} data...")
+        predictions = []
+        true_labels = []
+   
+        # We must iterate over the whole dataset
+        for signals, annotations in dataset:
+            preds = self.model.predict(signals, verbose=0)
+            preds_binary = (preds > 0.5).astype(int) # Convert probabilities to 0 or 1
+            predictions.extend(preds_binary.flatten())
+            true_labels.extend(annotations.numpy().flatten())
+
+        # Use 'weighted' F1 to account for imbalance in the metric itself
+        return f1_score(true_labels, predictions, average="weighted")
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+
+        # 1. Compute Validation F1
+        val_f1 = self.compute_f1(self.validation_data, "validation")
+        logs["val_f1_score"] = val_f1
+        print(f"Epoch {epoch+1}: val_f1_score = {val_f1:.4f}")
+
+        # 2. Optionally compute Training F1 (can be slow, set train_data=None to disable)
+        if self.train_data:
+            train_f1 = self.compute_f1(self.train_data, "training")
+            logs["train_f1_score"] = train_f1
+            print(f"Epoch {epoch+1}: train_f1_score = {train_f1:.4f}")
+
+        # 3. Save the best model based on validation F1
+        if val_f1 > self.best_f1:
+            print(f"Validation F1 improved from {self.best_f1:.4f} to {val_f1:.4f}. Saving model.")
+            self.best_f1 = val_f1
+            self.model.save("best_model_by_f1.h5") # Save the best model
+        else:
+            print(f"Validation F1 did not improve from {self.best_f1:.4f}.")
+
+
+# --- 6. Main Training Execution ---
+
+if __name__ == "__main__":
+    
+
+    # directories containing your .tfrecord files
+    tfFOLDERS = '/media/erikjan/SeagateC25_stora/pedLimbDetectCNS/tfrecords/'
+    TRAIN_TFRECORD_DIR = tfFOLDERS + "train"
+    VAL_TFRECORD_DIR = tfFOLDERS + "val"
+    TEST_TFRECORD_DIR = tfFOLDERS + "test"
+    
+    BATCH_SIZE = 64 
+    
+    print("--- 1. Finding TFRecord Files ---")
+    # Use glob to find all .tfrecord files, including in subdirectories
+    train_tfrecords = glob.glob(os.path.join(TRAIN_TFRECORD_DIR, "**", "*.tfrecord"), recursive=True)
+    val_tfrecords = glob.glob(os.path.join(VAL_TFRECORD_DIR, "**", "*.tfrecord"), recursive=True)
+    test_tfrecords = glob.glob(os.path.join(TEST_TFRECORD_DIR, "**", "*.tfrecord"), recursive=True)
+    
+    if not train_tfrecords or not val_tfrecords:
+        raise FileNotFoundError("Could not find any .tfrecord files. Please check your TRAIN_TFRECORD_DIR and VAL_TFRECORD_DIR paths.")
+        
+    print(f"Found {len(train_tfrecords)} training TFRecord files.")
+    print(f"Found {len(val_tfrecords)} validation TFRecord files.")
+    print(f"Found {len(test_tfrecords)} test TFRecord files.")
+
+    print("\n--- 2. Creating tf.data.Dataset Pipelines ---")
+    # Note: We pass is_training=False to val/test to disable shuffling
+    train_dataset = create_dataset(train_tfrecords, batch_size=BATCH_SIZE, is_training=True)
+    val_dataset = create_dataset(val_tfrecords, batch_size=BATCH_SIZE, is_training=False)
+    test_dataset = create_dataset(test_tfrecords, batch_size=BATCH_SIZE, is_training=False)
+
+    # (Optional) Check the output shape of one batch
+    for signals, annotations in train_dataset.take(1):
+        print(f"Batch shapes: Signals={signals.shape}, Annotations={annotations.shape}")
+        # Should be: Signals=(64, 134400, 2), Annotations=(64, 2100)
+
+    print("\n--- 3. Computing Class Weights ---")
+    # This will iterate through the training dataset once
+    class_weight_dict = compute_class_weights(train_dataset)
+
+    print("\n--- 4. Building and Compiling Model ---")
+    tf.keras.backend.clear_session()
+    model = build_usleep_model_ayt(input_shape=(SIGNAL_SAMPLES, NUM_CHANNELS))
+    # model.summary() # Uncomment to see the full architecture
+    
+    optimizer = keras.optimizers.Adam(learning_rate=0.0001)
+    
+    # Compile the model with our custom weighted focal loss
+    model.compile(
+        optimizer=optimizer,
+        loss=weighted_focal_loss(class_weight_dict, gamma=2.0),
+        metrics=['accuracy'] # We can monitor accuracy, but F1 is what matters
+    )
+    print("Model compiled successfully.")
+
+    print("\n--- 5. Setting up Callbacks ---")
+    # This callback will save the best model to 'best_model_by_f1.h5'
+    f1_callback = F1ScoreCallback(
+        validation_data=val_dataset,
+        train_data=None # Set to `train_dataset` if you want F1 on training data (slower)
     )
     
-    class_weight_dict = dict(zip(class_counts.keys(), balanced_weights))
+    # This callback will stop training if the val_loss doesn't improve for 10 epochs
+    # Note: Your advisor's code monitored 'val_f1_score', but that's not
+    # automatically logged. We'll monitor 'val_loss' instead.
+    # The F1 callback *already* saves the best model by F1 score.
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss', # Monitor validation loss
+        patience=10, 
+        mode='min', 
+        restore_best_weights=True # Restore weights from epoch with best val_loss
+    )
 
-    print("Computed Class Weights:", class_weight_dict)
-    print(f"Total training batches found: {total_batches}")
-    return class_weight_dict, total_batches 
+    print("\n--- 6. Starting Model Training ---")
+    model.fit(
+        train_dataset,
+        validation_data=val_dataset,
+        epochs=100, # Set a high number; EarlyStopping will handle the rest
+        callbacks=[f1_callback, early_stopping],
+        verbose=1 # 'verbose=1' shows the progress bar
+    )
 
-def squeeze_output_metric(y_true, y_pred):
-    # This function is run inside the TF graph and handles the reshape
-    y_pred_squeezed = tf.squeeze(y_pred, axis=-1)
+    print("\n--- Training complete ---")
+    print(f"Best validation F1 score achieved: {f1_callback.best_f1:.4f}")
+    print("Best model saved to 'best_model_by_f1.h5'")
+
+    # (Optional) Evaluate on the test set
+    print("\n--- 7. Evaluating on Test Set ---")
+    print("Loading best model from 'best_model_by_f1.h5'...")
+    best_model = tf.keras.models.load_model(
+        'best_model_by_f1.h5',
+        custom_objects={'loss_fn': weighted_focal_loss(class_weight_dict)}
+    )
     
-    # We can now use the FBetaScore class directly
-    # Note: Keras metrics are stateful, so we must instantiate the metric here
-    # Use your custom f1_m which handles the squeeze internally:
-    return f1_m(y_true, y_pred_squeezed) # <--- Re-use your custom f1_m function
-
-# --- End Data Pipeline Functions ---
-
-
-# --- Strategy and Data Loading ---
-
-strategy = tf.distribute.MirroredStrategy()
-print(f"Number of devices: {strategy.num_replicas_in_sync}")
-
-trainFold = folders_dir + 'train'
-valFold = folders_dir + 'val'
-testFold = folders_dir + 'test'
-
-# ... (Folder and TFRecord file list generation remains the same) ...
-train_folders = [f for f in os.listdir(trainFold) if os.path.isdir(os.path.join(trainFold, f))]
-val_folders = [f for f in os.listdir(valFold) if os.path.isdir(os.path.join(valFold, f))]
-test_folders = [f for f in os.listdir(testFold) if os.path.isdir(os.path.join(testFold, f))]
-
-print(len(train_folders), "training folders found.")
-
-train_tfrecords = [os.path.join(trainFold, f, f"{f}.tfrecord") for f in train_folders]
-train_dataset = create_dataset(train_tfrecords, batch_size=64)
-for signals, annotations in train_dataset.take(1):
-    print("Train data shape:", signals.shape, annotations.shape)
-   
-val_tfrecords = [os.path.join(valFold, f, f"{f}.tfrecord") for f in val_folders]
-val_dataset = create_dataset(val_tfrecords, batch_size=64)
-for signals, annotations in val_dataset.take(1):
-    print("Validation data shape:", signals.shape, annotations.shape)
-
-test_tfrecords = [os.path.join(testFold, f, f"{f}.tfrecord") for f in test_folders]
-test_dataset = create_dataset(test_tfrecords, batch_size=64)
-for signals, annotations in test_dataset.take(1):
-   print("Test data shape:", signals.shape, annotations.shape)
-
-
-
-
-# --- Compilation and Training ---
-
-class_weight_dict, train_steps = compute_class_weights(train_dataset) 
-
-# --- START STRATEGY SCOPE ---
-with strategy.scope():
-    model = build_unet_model_ayt(input_shape=(134400, 2))
-    
-    # CRITICAL FIX: Lower the learning rate for Focal Loss stability
-    optimizer = keras.optimizers.Adam(learning_rate=0.00005) # Reduced from 0.0001
-    
-    focal_loss_fn = create_weighted_focal_loss(class_weight_dict, gamma=2.0)
-    
-    # Use the Keras F1 metric
-    # Compile INSIDE the scope
-    model.compile(optimizer=optimizer, 
-                  loss=focal_loss_fn, 
-                  metrics=['accuracy', squeeze_output_metric])
-# --- END STRATEGY SCOPE ---
-
-print("Model Compiled with Weighted Focal Loss under MirroredStrategy")
-
-# Early stopping now monitors the new 'val_f1_score' metric
-early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_f1_score', patience=10, mode='max', restore_best_weights=True)
-
-# CRITICAL FIX: Add steps_per_epoch and .repeat()
-model.fit(
-    train_dataset.repeat(),        # Must repeat so TF doesn't exhaust the dataset after one pass
-    validation_data=val_dataset,
-    epochs=1000,
-    callbacks=[early_stopping],
-    steps_per_epoch=train_steps,   # FIX: Explicitly tells TF how many batches are in an epoch
-    validation_steps=len(val_tfrecords), # Good practice: Tell TF how many batches are in val_set
-    verbose=1
-)
-
-
-################################# Save Model ##################################
-
-model.save("trained_model_usleep_new.h5")
+    # Compute final F1 on test data
+    test_f1 = f1_callback.compute_f1(test_dataset, "TEST")
+    print(f"--- FINAL TEST F1 SCORE: {test_f1:.4f} ---")

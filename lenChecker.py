@@ -95,7 +95,7 @@ def get_h5_resampled_len(h5_file_path: str) -> Union[int, None]:
 if __name__ == "__main__":
     # !!! IMPORTANT !!!
     # You must provide BOTH file paths for the comparison to work.
-    base = "/media/erikjan/SeagateC25_stora/cdac Dropbox/Carlos Nunez-Sosa/pedLimb0/tfrecords/test/"
+    base = "/media/erikjan/SeagateC25_stora/pedLimbDetectCNS/tfrecords/test/"
     example_tfrecord_file = base + "sub-I0003175001794_ses-1_task-PSG_eeg/sub-I0003175001794_ses-1_task-PSG_eeg.tfrecord"
     corresponding_h5_file = "/media/erikjan/SeagateC25_stora/cdac Dropbox/BCH_h5_samples/sub-I0003175001794_ses-1_task-PSG_eeg/sub-I0003175001794_ses-1_task-PSG_eeg.h5"
 
