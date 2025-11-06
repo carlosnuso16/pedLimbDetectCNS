@@ -64,6 +64,7 @@ def create_dataset(tfrecord_files, batch_size=64, shuffle_buffer_size=100, prefe
     if is_training:
         # For training, shuffle the dataset
         dataset = dataset.shuffle(shuffle_buffer_size)
+        dataset = dataset.repeat()
         
     dataset = dataset.map(parse_tfrecord, num_parallel_calls=tf.data.AUTOTUNE)  # Parse each record
     dataset = dataset.batch(batch_size)  # Batch the data
@@ -245,7 +246,7 @@ class F1ScoreCallback(Callback):
             true_labels.extend(annotations.numpy().flatten())
 
         # Use 'weighted' F1 to account for imbalance in the metric itself
-        return f1_score(true_labels, predictions, average="weighted")
+        return f1_score(true_labels, predictions, average="binary", pos_label=1)
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -280,8 +281,8 @@ if __name__ == "__main__":
     TRAIN_TFRECORD_DIR = tfFOLDERS + "train"
     VAL_TFRECORD_DIR = tfFOLDERS + "val"
     TEST_TFRECORD_DIR = tfFOLDERS + "test"
-    
-    BATCH_SIZE = 64 
+
+    BATCH_SIZE = 2 ## crashed at 8... trying 2
     
     print("--- 1. Finding TFRecord Files ---")
     # Use glob to find all .tfrecord files, including in subdirectories
@@ -322,7 +323,8 @@ if __name__ == "__main__":
     model.compile(
         optimizer=optimizer,
         loss=weighted_focal_loss(class_weight_dict, gamma=2.0),
-        metrics=['accuracy'] # We can monitor accuracy, but F1 is what matters
+        metrics=['accuracy'], # We can monitor accuracy, but F1 is what matters
+        run_eagerly=False
     )
     print("Model compiled successfully.")
 
