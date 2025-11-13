@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '2'  # Use only GPU 2
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'  # Use only GPU 2
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Suppress TensorFlow warnings
 
 import tensorflow as tf
@@ -12,6 +12,7 @@ from sklearn.metrics import f1_score
 import tensorflow.keras.backend as K
 from sklearn.utils.class_weight import compute_class_weight
 import warnings
+import GPUtil
 
 # --- 1. Constants (from your original script) ---
 # These are needed for the parser to know the shape of your data
@@ -282,7 +283,7 @@ if __name__ == "__main__":
     VAL_TFRECORD_DIR = tfFOLDERS + "val"
     TEST_TFRECORD_DIR = tfFOLDERS + "test"
 
-    BATCH_SIZE = 2 ## crashed at 8... trying 2
+    BATCH_SIZE = 32 ## crashed at 8... trying 2
     
     print("--- 1. Finding TFRecord Files ---")
     # Use glob to find all .tfrecord files, including in subdirectories
@@ -310,14 +311,16 @@ if __name__ == "__main__":
 
     print("\n--- 3. Computing Class Weights ---")
     # This will iterate through the training dataset once
-    class_weight_dict = compute_class_weights(train_dataset)
+    # class_weight_dict = compute_class_weights(train_dataset)
+    class_weight_dict = {0: 0.5018162877934619, 1: 138.14338498553548}
+    print("Using Class Weights:", class_weight_dict)
 
     print("\n--- 4. Building and Compiling Model ---")
     tf.keras.backend.clear_session()
     model = build_usleep_model_ayt(input_shape=(SIGNAL_SAMPLES, NUM_CHANNELS))
     # model.summary() # Uncomment to see the full architecture
     
-    optimizer = keras.optimizers.Adam(learning_rate=0.0001)
+    optimizer = keras.optimizers.Adam(learning_rate=0.00001)
     
     # Compile the model with our custom weighted focal loss
     model.compile(
@@ -345,14 +348,23 @@ if __name__ == "__main__":
         mode='min', 
         restore_best_weights=True # Restore weights from epoch with best val_loss
     )
-
+    #point of interest: lost
     print("\n--- 6. Starting Model Training ---")
+    steps_per_epoch = 844 #len(train_tfrecords) // BATCH_SIZE
+    validation_steps = 160 #len(val_tfrecords) // BATCH_SIZE
+
+    print(f"--- 6. Starting Model Training ---")
+    print(f"   Batch Size: {BATCH_SIZE}")
+    print(f"   Steps per Epoch: {steps_per_epoch} (train_files / batch_size)")
+    print(f"   Validation Steps: {validation_steps} (val_files / batch_size)")
     model.fit(
         train_dataset,
         validation_data=val_dataset,
-        epochs=100, # Set a high number; EarlyStopping will handle the rest
+        epochs=10000, # Set a high number; EarlyStopping will handle the rest
         callbacks=[f1_callback, early_stopping],
-        verbose=1 # 'verbose=1' shows the progress bar
+        verbose=1, # 'verbose=1' shows the progress bar
+        steps_per_epoch=steps_per_epoch,
+        validation_steps=validation_steps
     )
 
     print("\n--- Training complete ---")
