@@ -278,12 +278,12 @@ if __name__ == "__main__":
     
 
     # directories containing your .tfrecord files
-    tfFOLDERS = '/media/erikjan/SeagateC25_stora/pedLimbDetectCNS/tfrecords/'
+    tfFOLDERS = '/mnt/SeagateC25_stora/pedLimbDetectCNS/tfrecords/'
     TRAIN_TFRECORD_DIR = tfFOLDERS + "train"
     VAL_TFRECORD_DIR = tfFOLDERS + "val"
     TEST_TFRECORD_DIR = tfFOLDERS + "test"
 
-    BATCH_SIZE = 32 ## crashed at 8... trying 2
+    BATCH_SIZE = 64 ## crashed at 8... trying 2
     
     print("--- 1. Finding TFRecord Files ---")
     # Use glob to find all .tfrecord files, including in subdirectories
@@ -320,7 +320,7 @@ if __name__ == "__main__":
     model = build_usleep_model_ayt(input_shape=(SIGNAL_SAMPLES, NUM_CHANNELS))
     # model.summary() # Uncomment to see the full architecture
     
-    optimizer = keras.optimizers.Adam(learning_rate=0.00001)
+    optimizer = keras.optimizers.Adam(learning_rate=0.0001)
     
     # Compile the model with our custom weighted focal loss
     model.compile(
@@ -344,14 +344,27 @@ if __name__ == "__main__":
     # The F1 callback *already* saves the best model by F1 score.
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss', # Monitor validation loss
-        patience=10, 
+        patience=15, 
         mode='min', 
         restore_best_weights=True # Restore weights from epoch with best val_loss
     )
     #point of interest: lost
     print("\n--- 6. Starting Model Training ---")
-    steps_per_epoch = 844 #len(train_tfrecords) // BATCH_SIZE
-    validation_steps = 160 #len(val_tfrecords) // BATCH_SIZE
+
+    def count_examples_in_tfrecords(tfrecord_files):
+        total = 0
+        for f in tfrecord_files:
+            ds = tf.data.TFRecordDataset(f)
+            total += sum(1 for _ in ds)
+        return total
+
+    # num_train_examples = count_examples_in_tfrecords(train_tfrecords)
+    # steps_per_epoch = max(1, num_train_examples // BATCH_SIZE)
+    # num_val_examples = count_examples_in_tfrecords(val_tfrecords)
+    # validation_steps = max(1, num_val_examples // BATCH_SIZE)
+
+    steps_per_epoch = 2000 #(len(train_tfrecords) // BATCH_SIZE) * 35
+    validation_steps = 300 #len(val_tfrecords) // BATCH_SIZE
 
     print(f"--- 6. Starting Model Training ---")
     print(f"   Batch Size: {BATCH_SIZE}")

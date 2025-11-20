@@ -1,5 +1,7 @@
 myenv/*
+tf-gpu-env/*
 tfrecords/*
+tfrecordsOLD/*
 train_set.csv
 val_set.csv
 test_set.csv

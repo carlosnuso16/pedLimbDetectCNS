@@ -15,8 +15,8 @@ from tensorMain import (
 )
 
 # --- 1. Settings ---
-TRAIN_TFRECORD_DIR = "/media/erikjan/SeagateC25_stora/pedLimbDetectCNS/tfrecords/train"
-BATCH_SIZE = 8 # Keep this reasonable
+TRAIN_TFRECORD_DIR = "/mnt/SeagateC25_stora/pedLimbDetectCNS/tfrecords/train"
+BATCH_SIZE = 16 # Keep this reasonable
 SAMPLES_PER_WINDOW = int(SF_TARGET / 2) # 128 / 2Hz = 64 samples per window
 
 def root_mean_square(signal):

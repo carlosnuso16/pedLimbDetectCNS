@@ -184,10 +184,10 @@ def get_base_path():
     if computer_name == "Flippy":
         return "c:/Users/carlo/"
     elif computer_name == "erikjan-desktop":
-        return "/media/erikjan/SeagateC25_stora/"
+        return "/mnt/SeagateC25_stora/"
     else:
         print("Warning: Unknown computer, using default path.")
-        return "/media/erikjan/SeagateC25_stora/"
+        return "/mnt/SeagateC25_stora/"
 
 def load_h5_folders(csv_path, root_dir):
     df = pd.read_csv(csv_path)
