@@ -1,5 +1,9 @@
 #conda activate tf_pip_fix
+
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["TF_TRT_DISABLE"] = "1"   # avoid TensorRT warnings
+
 os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 import tensorflow as tf
@@ -216,7 +220,7 @@ TRAIN_TFRECORD_DIR = os.path.join(tfFOLDERS, "train")
 VAL_TFRECORD_DIR = os.path.join(tfFOLDERS, "val")
 TEST_TFRECORD_DIR = os.path.join(tfFOLDERS, "test")
 
-BATCH_SIZE = 64 # Start with 16, you can increase later if it doesn't crash
+BATCH_SIZE = 32 # Start with 16, you can increase later if it doesn't crash
 NUM_EPOCHS = 1000 # Set high, EarlyStopping will handle it
 PATIENCE = 20
 
@@ -251,7 +255,8 @@ test_dataset = create_dataset(test_tfrecords, batch_size=BATCH_SIZE, is_training
 
 # --- 4. Compute Class Weights ---
 # (This runs a loop over the data, which is fine)
-class_weights = compute_class_weights(train_tfrecords)
+# class_weights = compute_class_weights(train_tfrecords) #temp comment out
+class_weights = {0: 0.5018162877934619, 1: 138.14338498553548}
 
 # --- 5. Build, Compile, and Define Steps ---
 print("\n--- 5. Building and Compiling Model ---")

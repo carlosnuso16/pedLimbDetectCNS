@@ -63,19 +63,18 @@ def resample_signal_chunk(signal_chunk_200hz):
         return final_data
 
 def resample_anot_chunk(anot_chunk_200hz):
-    """
-    Resamples one 30-second, 200Hz annotation chunk (6000,)
-    down to a 2Hz annotation chunk (60,).
-    """
-    factor = int(SF_ORIG / ANOT_TARGET_FREQ) # 200 / 2 = 100
+    """Resample using MNE for consistency with signal resampling"""
+    info = mne.create_info(ch_names=['anot'], sfreq=SF_ORIG, ch_types=['misc'])
+    raw_anot = mne.io.RawArray(anot_chunk_200hz.reshape(1, -1), info)
+    raw_anot.resample(ANOT_TARGET_FREQ)
+    resampled = raw_anot.get_data().squeeze()
     
-    # Ensure the chunk is the exact length (6000)
-    if anot_chunk_200hz.shape[0] != CHUNK_SAMPLES_200HZ:
-        # This shouldn't happen if our chunking logic is right
-        return np.zeros(CHUNK_SAMPLES_2HZ, dtype=np.int64)
-
-    # Reshape (6000,) -> (60, 100) and take the max over the 100 samples
-    resampled = np.max(anot_chunk_200hz.reshape(-1, factor), axis=1)
+    # Apply same padding/truncation as signals
+    if resampled.shape[0] != CHUNK_SAMPLES_2HZ:
+        final_data = np.zeros(CHUNK_SAMPLES_2HZ, dtype=np.int64)
+        copy_len = min(resampled.shape[0], CHUNK_SAMPLES_2HZ)
+        final_data[:copy_len] = resampled[:copy_len]
+        return final_data
     return resampled.astype(np.int64)
 
 
