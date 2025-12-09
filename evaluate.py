@@ -7,28 +7,61 @@ from tqdm import tqdm
 from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
 import warnings
 
-# --- 1. Import functions and constants from your training script ---
-# This assumes 'evaluate.py' is in the same folder as 'train_model_stable.py'
-try:
-    from tensorMain import (
-        parse_tfrecord, 
-        create_dataset, 
-        weighted_focal_loss,
-        ANOT_SAMPLES,
-        SIGNAL_SAMPLES,
-        NUM_CHANNELS
-    )
-except ImportError:
-    print("Error: Could not import from 'tensorMain.py'.")
-    print("Please make sure 'evaluate.py' is in the same directory.")
-    exit()
-
-# --- 2. Configuration ---
+# --- 1. CONFIGURATION ---
 # --- Point this to your FAST SSD drive ---
 tfFOLDERS = '/mnt/SeagateC25_stora/pedLimbDetectCNS/tfrecords/' 
 TEST_TFRECORD_DIR = os.path.join(tfFOLDERS, "test")
-MODEL_PATH = "firstModel.h5" # The model saved by your F1Callback
-BATCH_SIZE = 32 # Can be larger for evaluation
+MODEL_PATH = "best_model_custom_loop.keras" # Point to your .keras file
+BATCH_SIZE = 32
+
+# --- Constants (Must match training) ---
+# It's safer to redefine them here than import, to avoid circular dependency errors
+SEGMENT_COUNT = 35
+SEGMENT_LEN_SEC = 30
+SF_TARGET = 128
+ANOT_TARGET_FREQ = 2
+NUM_CHANNELS = 2
+SIGNAL_SAMPLES = 134400 
+ANOT_SAMPLES = 2100 
+
+# --- 2. Helper Functions (Needed for Data Loading) ---
+
+def parse_tfrecord(example_proto):
+    feature_description = {
+        'signals': tf.io.FixedLenFeature([], tf.string),
+        'annotations': tf.io.FixedLenFeature([ANOT_SAMPLES], tf.int64),
+    }
+    parsed_example = tf.io.parse_single_example(example_proto, feature_description)
+    signals = tf.io.decode_raw(parsed_example['signals'], tf.float32)
+    signals = tf.reshape(signals, (NUM_CHANNELS, SIGNAL_SAMPLES))
+    signals = tf.transpose(signals)
+    annotations = tf.cast(parsed_example['annotations'], tf.int32)
+    return signals, annotations
+
+def create_dataset(tfrecord_files, batch_size=64, is_training=False):
+    dataset = tf.data.TFRecordDataset(tfrecord_files)
+    dataset = dataset.map(parse_tfrecord, num_parallel_calls=tf.data.AUTOTUNE)
+    if is_training:
+        dataset = dataset.shuffle(100)
+        dataset = dataset.repeat()
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset
+
+# --- 3. Custom Loss Definition (Needed for Loading) ---
+# We must define this EXACTLY as it was in the training script
+import tensorflow.keras.backend as K
+def weighted_focal_loss(pos_weight, neg_weight, gamma=2.0):
+    def loss(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = K.flatten(y_pred)
+        y_true = K.flatten(y_true)
+        epsilon = K.epsilon()
+        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
+        loss_pos = -pos_weight * y_true * K.pow(1 - y_pred, gamma) * K.log(y_pred)
+        loss_neg = -neg_weight * (1 - y_true) * K.pow(y_pred, gamma) * K.log(1 - y_pred)
+        return K.mean(loss_pos + loss_neg)
+    return loss
 
 def main():
     print(f"--- 1. Finding Test Files ---")
@@ -39,27 +72,26 @@ def main():
 
     # --- 2. Load Test Dataset ---
     print(f"--- 2. Loading Test Dataset (Batch Size: {BATCH_SIZE}) ---")
-    # is_training=False ensures no shuffling and no repeating
     test_dataset = create_dataset(test_tfrecords, batch_size=BATCH_SIZE, is_training=False)
 
     # --- 3. Load Model ---
     print(f"--- 3. Loading Model from {MODEL_PATH} ---")
-    # We must provide the custom loss function to load the model
-    # The weights don't matter for loading, so we can use a dummy dict
-    dummy_weights = {0: 1.0, 1: 1.0}
-    custom_objects = {'loss_fn': weighted_focal_loss(dummy_weights)}
     
+    # CRITICAL STEP:
+    # When loading a model with a custom loss that requires arguments (like pos_weight),
+    # we often have to load it without the optimizer/loss first, or provide a 
+    # dummy version of the loss function.
+    
+    # Strategy: Register the inner 'loss' function name if Keras saved it that way,
+    # OR simpler: Load with compile=False.
+    # Since we are only evaluating (predicting), we do NOT need the optimizer or loss function!
     try:
-        model = tf.keras.models.load_model(MODEL_PATH, custom_objects=custom_objects)
+        model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+        print("Model loaded successfully (compiled=False).")
     except Exception as e:
         print(f"\n--- MODEL LOADING FAILED ---")
         print(f"Error: {e}")
-        print("\nThis often happens if the 'weighted_focal_loss' function name in your")
-        print("training script doesn't match what's saved in the model.")
-        print("Please ensure your 'train_model_stable.py' is up to date.")
         return
-
-    print("Model loaded successfully.")
 
     # --- 4. Run Evaluation ---
     print(f"--- 4. Running predictions on {len(test_tfrecords)} test files... ---")
@@ -83,8 +115,6 @@ def main():
     # --- 5. Calculate and Print Metrics ---
     print("\n--- 5. FINAL TEST METRICS ---")
     
-    # Calculate key metrics for the "Movement" class (pos_label=1)
-    # This is the most important metric for you
     f1_binary = f1_score(all_true_labels, all_predictions, pos_label=1, average='binary', zero_division=0)
     precision_binary = precision_score(all_true_labels, all_predictions, pos_label=1, zero_division=0)
     recall_binary = recall_score(all_true_labels, all_predictions, pos_label=1, zero_division=0)
@@ -95,7 +125,6 @@ def main():
     print(f"Recall (Class 1):    {recall_binary:.4f}")
 
     print("\n--- Full Classification Report ---")
-    # This provides a detailed breakdown for both classes
     report = classification_report(
         all_true_labels, 
         all_predictions, 
@@ -105,6 +134,5 @@ def main():
     print(report)
 
 if __name__ == "__main__":
-    # Suppress TensorFlow UserWarnings about data running out
     warnings.filterwarnings("ignore", category=UserWarning, module='tensorflow')
     main()

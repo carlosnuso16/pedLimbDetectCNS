@@ -6,3 +6,4 @@ train_set.csv
 val_set.csv
 test_set.csv
 best_model_by_f1.h5
+best_model_custom_loop.keras

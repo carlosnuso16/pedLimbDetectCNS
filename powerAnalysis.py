@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 # --- Import functions from your training script ---
 # (Make sure train_model_stable.py is in the same folder)
-from tensorMain import (
+from misc.tensorMain import (
     parse_tfrecord, 
     create_dataset,
     SIGNAL_SAMPLES,
