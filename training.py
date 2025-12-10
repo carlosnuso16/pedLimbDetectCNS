@@ -352,4 +352,4 @@ for epoch in range(NUM_EPOCHS):
             break
             
     # Clear session to prevent memory leaks in a long loop
-    tf.keras.backend.clear_session()
+    # tf.keras.backend.clear_session()

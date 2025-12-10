@@ -241,9 +241,9 @@ def main_generate():
     BASE_TFRECORD_OUTPUT = os.path.join(scripts_dir, 'tfrecords')
 
     # Process all sets
-    process_data_set(train_folders, "train", root_dir, BASE_TFRECORD_OUTPUT, limit=500)
-    process_data_set(val_folders, "val", root_dir, BASE_TFRECORD_OUTPUT, limit=100)
-    process_data_set(test_folders, "test", root_dir, BASE_TFRECORD_OUTPUT, limit=100)
+    process_data_set(train_folders, "train", root_dir, BASE_TFRECORD_OUTPUT, limit=None)
+    process_data_set(val_folders, "val", root_dir, BASE_TFRECORD_OUTPUT, limit=None)
+    process_data_set(test_folders, "test", root_dir, BASE_TFRECORD_OUTPUT, limit=None)
 
     print("\nTFRecord generation complete.")
 
